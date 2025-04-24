@@ -19,6 +19,7 @@ import {
   Volume2, 
   VolumeX,
   AlertTriangle,
+  WifiOff,
   X,
   Loader2
 } from "lucide-react"
@@ -42,9 +43,20 @@ interface BattleArenaProps {
   playerAddress: string
   onExit: () => void
   onMove: (move: Move) => Promise<boolean>
+  isOffline?: boolean        // Added to show offline status
+  isReconnecting?: boolean   // Added to show reconnecting status
+  onRetryConnection?: () => void  // Added to allow manual reconnection
 }
 
-export default function BattleArena({ gameState, playerAddress, onExit, onMove }: BattleArenaProps) {
+export default function BattleArena({ 
+  gameState, 
+  playerAddress, 
+  onExit, 
+  onMove,
+  isOffline = false,
+  isReconnecting = false,
+  onRetryConnection
+}: BattleArenaProps) {
   const { toast } = useToast()
   const [selectedCard, setSelectedCard] = useState<number | null>(null)
   const [attackType, setAttackType] = useState<"normal" | "special">("normal")
@@ -418,14 +430,24 @@ export default function BattleArena({ gameState, playerAddress, onExit, onMove }
       <div className="absolute inset-0 bg-black/25"></div>
       
       {/* Sound toggle */}
-      <Button 
-        variant="ghost" 
-        size="icon" 
-        className="absolute top-4 right-4 z-50 bg-gray-900/60 text-white hover:bg-gray-800/80"
-        onClick={toggleSound}
-      >
-        {soundEnabled ? <Volume2 className="h-5 w-5" /> : <VolumeX className="h-5 w-5" />}
-      </Button>
+      {isOffline && (
+        <div className="absolute top-20 left-1/2 transform -translate-x-1/2 z-50 flex items-center gap-2 bg-red-900/90 text-white px-4 py-2 rounded-md animate-pulse">
+          <WifiOff className="h-4 w-4" />
+          <span className="text-sm">
+            {isReconnecting ? "Reconnecting..." : "Offline Mode"}
+          </span>
+          {!isReconnecting && onRetryConnection && (
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              onClick={onRetryConnection}
+              className="ml-2 h-7 text-xs bg-red-800 hover:bg-red-700"
+            >
+              Retry
+            </Button>)}
+
+          </div>
+          )}
 
       {/* Game over modal */}
       {isGameOver && (

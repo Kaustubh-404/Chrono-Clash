@@ -1,12 +1,27 @@
+'use client'
+
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { HeroSection } from "@/components/landing/hero-section"
 import { GameFeatures } from "@/components/landing/game-features"
 import { CharacterShowcase } from "@/components/landing/character-showcase"
 import { Footer } from "@/components/landing/footer"
+import { useState, useEffect } from "react"
+import { TransitionManager } from "@/components/game/transition-manager"
 
 export default function Home() {
+
+  const [isPageVisible, setIsPageVisible] = useState(false)
+  
+  useEffect(() => {
+    setIsPageVisible(true)
+    
+    // Trigger app loaded event
+    window.dispatchEvent(new Event('app-loaded'))
+  }, [])
+
   return (
+    <TransitionManager isVisible={isPageVisible} transition="fade" duration={500}>
     <main className="min-h-screen bg-gradient-to-b from-gray-900 to-gray-950 text-white">
       <HeroSection />
       <GameFeatures />
@@ -28,5 +43,6 @@ export default function Home() {
       </div>
       <Footer />
     </main>
+    </TransitionManager>
   )
 }
