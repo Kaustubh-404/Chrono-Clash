@@ -2,44 +2,113 @@
 
 import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent } from "@/components/ui/card"
+import { Card } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { EnhancedCardComponent } from "@/components/game/card-component"
-import { ArenaHUD } from "@/components/game/arena-hud"
-import { Sword, Shield, ArrowLeft, Trophy, Clock } from "lucide-react"
+import { BattleCardDisplay } from "@/components/game/battle-card-display"
+import { BattleArenaHUD } from "@/components/game/arena-hud"
+import { BattleAttackAnimation } from "@/components/game/battle-attack-animation"
+import { BattleVictoryScreen } from "@/components/game/battle-victory-screen"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog"
+import { 
+  Sword, 
+  Shield, 
+  ArrowLeft, 
+  Trophy, 
+  Clock, 
+  Volume2, 
+  VolumeX,
+  AlertTriangle,
+  X,
+  Loader2
+} from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { generateCardPool, calculateDamage } from "@/lib/cards"
+import { cn } from "@/lib/utils"
 import { 
   applyMove, 
   createMove, 
   isPlayerTurn, 
   canSelectCard, 
-  canAttackCard 
+  canAttackCard,
+  formatTime
 } from "@/lib/game-utils"
-import type { GameState, Card as CardType, Move } from "@/lib/types"
+import { aoClient } from "@/lib/ao-client"
+import { arweaveWallet } from "@/lib/wallet"
+import type { GameState, Card as CardType, Move, BattleAnimation } from "@/lib/types"
 
-interface GameArenaProps {
+interface BattleArenaProps {
   gameState: GameState | null
   playerAddress: string
   onExit: () => void
   onMove: (move: Move) => Promise<boolean>
 }
 
-export default function GameArena({ gameState, playerAddress, onExit, onMove }: GameArenaProps) {
+export default function BattleArena({ gameState, playerAddress, onExit, onMove }: BattleArenaProps) {
   const { toast } = useToast()
   const [selectedCard, setSelectedCard] = useState<number | null>(null)
   const [attackType, setAttackType] = useState<"normal" | "special">("normal")
   const [isAttacking, setIsAttacking] = useState(false)
-  const [showAnimation, setShowAnimation] = useState(false)
-  const [animationProps, setAnimationProps] = useState({
-    type: "normal" as "normal" | "special",
-    sourcePosition: { x: 0, y: 0 },
-    targetPosition: { x: 0, y: 0 },
-  })
+  const [animation, setAnimation] = useState<BattleAnimation | null>(null)
+  const [currentAnimation, setCurrentAnimation] = useState<string | null>(null)
   const [turnTimer, setTurnTimer] = useState(30)
+  const [soundEnabled, setSoundEnabled] = useState(true)
+  const [showExitConfirm, setShowExitConfirm] = useState(false)
+  const [showTargetHelp, setShowTargetHelp] = useState(false)
+  const [isMobile, setIsMobile] = useState(false)
+  const [hintMessage, setHintMessage] = useState<string | null>(null)
   
-  const playerCardRefs = useRef<(HTMLDivElement | null)[]>([null, null, null, null])
-  const opponentCardRefs = useRef<(HTMLDivElement | null)[]>([null, null, null, null])
+  const playerCardsRef = useRef<HTMLDivElement>(null)
+  const opponentCardsRef = useRef<HTMLDivElement>(null)
+  const arenaRef = useRef<HTMLDivElement>(null)
+  const battleAudio = useRef<HTMLAudioElement | null>(null)
+  
+  // Check mobile device
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobile(window.innerWidth < 768)
+    }
+    
+    checkMobile()
+    window.addEventListener('resize', checkMobile)
+    
+    return () => {
+      window.removeEventListener('resize', checkMobile)
+    }
+  }, [])
+  
+  // Set up battle music
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      battleAudio.current = new Audio('/sounds/battle-music.mp3')
+      battleAudio.current.loop = true
+      battleAudio.current.volume = 0.3
+      
+      if (soundEnabled) {
+        battleAudio.current.play().catch(e => console.log("Couldn't play battle music", e))
+      }
+    }
+    
+    return () => {
+      if (battleAudio.current) {
+        battleAudio.current.pause()
+        battleAudio.current = null
+      }
+    }
+  }, [soundEnabled])
+  
+  // Toggle sound effects
+  const toggleSound = () => {
+    setSoundEnabled(!soundEnabled)
+    
+    if (battleAudio.current) {
+      if (soundEnabled) {
+        battleAudio.current.pause()
+      } else {
+        battleAudio.current.play().catch(e => console.log("Couldn't play battle music", e))
+      }
+    }
+  }
 
   // Get player and opponent cards
   const getPlayerCards = (): CardType[] => {
@@ -53,14 +122,22 @@ export default function GameArena({ gameState, playerAddress, onExit, onMove }: 
     if (!opponentAddress) return generateCardPool()
     return gameState.players[opponentAddress]?.cards || generateCardPool()
   }
+  
+  const getOpponentAddress = (): string | null => {
+    if (!gameState) return null
+    return Object.keys(gameState.players).find(addr => addr !== playerAddress) || null
+  }
 
   const playerCards = getPlayerCards()
   const opponentCards = getOpponentCards()
+  const opponentAddress = getOpponentAddress()
 
   // Reset timer when turn changes
   useEffect(() => {
     if (!gameState) return
-    setTurnTimer(30)
+    
+    const timeLimit = gameState.turnTimeLimit || 30
+    setTurnTimer(timeLimit)
     
     const timer = setInterval(() => {
       setTurnTimer(prev => {
@@ -68,13 +145,36 @@ export default function GameArena({ gameState, playerAddress, onExit, onMove }: 
         return prev - 1
       })
     }, 1000)
+    
+    // Play turn sound if it's the player's turn
+    if (isPlayerTurn(gameState, playerAddress) && soundEnabled) {
+      const audio = new Audio('/sounds/your-turn.mp3')
+      audio.volume = 0.5
+      audio.play().catch(e => console.log("Couldn't play turn sound", e))
+    }
 
     return () => clearInterval(timer)
-  }, [gameState?.currentTurn])
+  }, [gameState?.currentTurn, gameState?.turnTimeLimit, playerAddress, soundEnabled])
+  
+  // Set hint message based on game state
+  useEffect(() => {
+    if (!gameState) return
+    
+    if (isPlayerTurn(gameState, playerAddress)) {
+      if (selectedCard === null) {
+        setHintMessage("Select one of your cards to attack")
+      } else {
+        setHintMessage("Now choose an opponent's card to attack")
+      }
+    } else {
+      setHintMessage("Waiting for opponent's move...")
+    }
+  }, [gameState, playerAddress, selectedCard])
 
   // Handle card selection
   const handleCardSelect = (index: number) => {
     if (!gameState) return
+    
     if (!isPlayerTurn(gameState, playerAddress)) {
       toast({
         title: "Not your turn",
@@ -92,18 +192,45 @@ export default function GameArena({ gameState, playerAddress, onExit, onMove }: 
           description: `This card is on cooldown for ${card.cooldown} more seconds`,
           variant: "destructive",
         })
+        
+        // Play error sound
+        if (soundEnabled) {
+          const audio = new Audio('/sounds/error.mp3')
+          audio.volume = 0.3
+          audio.play().catch(e => console.log("Couldn't play sound", e))
+        }
       } else if (card.defeated) {
         toast({
           title: "Card defeated",
           description: "This card has been defeated and cannot be used",
           variant: "destructive",
         })
+        
+        // Play error sound
+        if (soundEnabled) {
+          const audio = new Audio('/sounds/error.mp3')
+          audio.volume = 0.3
+          audio.play().catch(e => console.log("Couldn't play sound", e))
+        }
       }
       return
     }
 
+    // Play card select sound
+    if (soundEnabled) {
+      const audio = new Audio('/sounds/card-select.mp3')
+      audio.volume = 0.4
+      audio.play().catch(e => console.log("Couldn't play sound", e))
+    }
+    
     setSelectedCard(index)
     setAttackType(card.usageCount >= 2 ? "special" : "normal")
+    
+    // Show target help on mobile
+    if (isMobile) {
+      setShowTargetHelp(true)
+      setTimeout(() => setShowTargetHelp(false), 3000)
+    }
   }
 
   // Handle attack
@@ -117,34 +244,19 @@ export default function GameArena({ gameState, playerAddress, onExit, onMove }: 
         description: "This card cannot be targeted",
         variant: "destructive",
       })
+      
+      // Play error sound
+      if (soundEnabled) {
+        const audio = new Audio('/sounds/error.mp3')
+        audio.volume = 0.3
+        audio.play().catch(e => console.log("Couldn't play sound", e))
+      }
+      
       return
     }
 
-    // Get positions for animation
-    const sourceElement = playerCardRefs.current[selectedCard]
-    const targetElement = opponentCardRefs.current[targetIndex]
-
-    if (sourceElement && targetElement) {
-      const sourceRect = sourceElement.getBoundingClientRect()
-      const targetRect = targetElement.getBoundingClientRect()
-
-      setAnimationProps({
-        type: attackType,
-        sourcePosition: {
-          x: sourceRect.left + sourceRect.width / 2,
-          y: sourceRect.top + sourceRect.height / 2,
-        },
-        targetPosition: {
-          x: targetRect.left + targetRect.width / 2,
-          y: targetRect.top + targetRect.height / 2,
-        },
-      })
-
-      setShowAnimation(true)
-    }
-
     setIsAttacking(true)
-
+    
     try {
       // Create the move
       const move = createMove(
@@ -155,43 +267,138 @@ export default function GameArena({ gameState, playerAddress, onExit, onMove }: 
         playerCards[selectedCard],
         opponentCards[targetIndex]
       )
+      
+      // Get card positions for animation
+      if (playerCardsRef.current && opponentCardsRef.current) {
+        // Calculate card positions
+        const playerCardElements = playerCardsRef.current.querySelectorAll('.battle-card')
+        const opponentCardElements = opponentCardsRef.current.querySelectorAll('.battle-card')
+        
+        if (playerCardElements[selectedCard] && opponentCardElements[targetIndex]) {
+          const playerRect = playerCardElements[selectedCard].getBoundingClientRect()
+          const opponentRect = opponentCardElements[targetIndex].getBoundingClientRect()
+          const arenaRect = arenaRef.current?.getBoundingClientRect() || { left: 0, top: 0 }
+          
+          // Set up animation data
+          setAnimation({
+            type: attackType === 'special' ? 'special' : 'attack',
+            source: {
+              player: playerAddress,
+              cardIndex: selectedCard,
+              position: { 
+                x: playerRect.left + playerRect.width / 2 - arenaRect.left, 
+                y: playerRect.top + playerRect.height / 2 - arenaRect.top 
+              }
+            },
+            target: {
+              player: opponentAddress || '',
+              cardIndex: targetIndex,
+              position: { 
+                x: opponentRect.left + opponentRect.width / 2 - arenaRect.left, 
+                y: opponentRect.top + opponentRect.height / 2 - arenaRect.top 
+              }
+            },
+            damage: move.damage,
+            duration: attackType === 'special' ? 2000 : 1200
+          })
+          
+          setCurrentAnimation('attack')
+          
+          // Play attack sound
+          if (soundEnabled) {
+            const audio = new Audio(attackType === 'special' ? '/sounds/special-attack.mp3' : '/sounds/attack.mp3')
+            audio.volume = 0.5
+            audio.play().catch(e => console.log("Couldn't play sound", e))
+          }
+          
+          // Wait for animation to complete
+          await new Promise(resolve => setTimeout(resolve, attackType === 'special' ? 2000 : 1200))
+          
+          // Play damage sound
+          if (soundEnabled) {
+            const audio = new Audio('/sounds/damage.mp3')
+            audio.volume = 0.4
+            audio.play().catch(e => console.log("Couldn't play sound", e))
+          }
+          
+          // Show damage animation
+          setCurrentAnimation('damage')
+          await new Promise(resolve => setTimeout(resolve, 800))
+        }
+      }
+      
+      // Reset animation
+      setAnimation(null)
+      setCurrentAnimation(null)
 
-      // Send the move to the parent component
+      // Send move to server
       const success = await onMove(move)
       
       if (!success) {
         throw new Error("Failed to process move")
       }
-
-      // Play sound effect
-      const audio = new Audio(attackType === "normal" ? "/sounds/attack.mp3" : "/sounds/special.mp3")
-      audio.volume = 0.5
-      audio.play().catch(e => console.error("Failed to play sound effect:", e))
       
+      // Check if card defeated
+      const damage = move.damage
+      const targetHP = opponentCards[targetIndex].hp
+      
+      if (targetHP - damage <= 0) {
+        // Card defeated animation and sound
+        if (soundEnabled) {
+          const audio = new Audio('/sounds/card-defeated.mp3')
+          audio.volume = 0.5
+          audio.play().catch(e => console.log("Couldn't play sound", e))
+        }
+        
+        toast({
+          title: "Card Defeated!",
+          description: `You defeated the opponent's ${opponentCards[targetIndex].name}!`,
+          variant: "default",
+        })
+      }
     } catch (error) {
       console.error("Error processing attack:", error)
       toast({
         title: "Attack failed",
-        description: "Failed to process attack. Please try again.",
+        description: "Failed to process your move. Please try again.",
         variant: "destructive",
       })
     } finally {
       setIsAttacking(false)
       setSelectedCard(null)
+      setShowTargetHelp(false)
     }
   }
 
-  // Handle animation completion
-  const handleAnimationComplete = () => {
-    setShowAnimation(false)
+  // Handle attack type change
+  const handleAttackTypeChange = (type: string) => {
+    setAttackType(type as "normal" | "special")
+    
+    // Play selection sound
+    if (soundEnabled) {
+      const audio = new Audio('/sounds/menu-select.mp3')
+      audio.volume = 0.3
+      audio.play().catch(e => console.log("Couldn't play sound", e))
+    }
+  }
+  
+  // Confirm exit
+  const confirmExit = () => {
+    setShowExitConfirm(true)
+  }
+  
+  const handleExitConfirm = () => {
+    setShowExitConfirm(false)
+    onExit()
   }
 
+  // Check game state
   if (!gameState) {
     return (
       <div className="min-h-screen bg-gradient-to-b from-gray-900 to-gray-950 flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-cyan-500 mx-auto mb-4"></div>
-          <h2 className="text-xl font-semibold text-white">Loading Arena...</h2>
+          <h2 className="text-xl font-semibold text-white">Loading Battle Arena...</h2>
           <p className="text-gray-400">Connecting to the AO process</p>
         </div>
       </div>
@@ -203,136 +410,272 @@ export default function GameArena({ gameState, playerAddress, onExit, onMove }: 
   const isWinner = gameState.winner === playerAddress
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-gray-900 to-gray-950 p-4">
+    <div 
+      ref={arenaRef}
+      className="min-h-screen bg-[url('/images/battle-background.jpg')] bg-cover bg-center relative overflow-hidden"
+    >
+      {/* Overlay for better text contrast */}
+      <div className="absolute inset-0 bg-black/25"></div>
+      
+      {/* Sound toggle */}
+      <Button 
+        variant="ghost" 
+        size="icon" 
+        className="absolute top-4 right-4 z-50 bg-gray-900/60 text-white hover:bg-gray-800/80"
+        onClick={toggleSound}
+      >
+        {soundEnabled ? <Volume2 className="h-5 w-5" /> : <VolumeX className="h-5 w-5" />}
+      </Button>
+
       {/* Game over modal */}
       {isGameOver && (
-        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
-          <Card className="w-full max-w-md bg-gray-800 border-gray-700">
-            <CardContent className="p-8 text-center">
-              <div className="mb-6">
-                {isWinner ? (
-                  <Trophy className="h-16 w-16 text-amber-500 mx-auto" />
-                ) : (
-                  <Shield className="h-16 w-16 text-red-500 mx-auto" />
-                )}
-              </div>
-              <h2 className="text-3xl font-bold mb-4">{isWinner ? "Victory!" : "Defeat!"}</h2>
-              <p className="text-gray-300 mb-6">
-                {isWinner ? `You've won ${gameState.wager} AR tokens!` : "Better luck next time."}
-              </p>
-              <Button onClick={onExit} className="w-full bg-cyan-600 hover:bg-cyan-700">
-                Return to Home
-              </Button>
-            </CardContent>
-          </Card>
-        </div>
+        <BattleVictoryScreen 
+          isWinner={isWinner} 
+          wager={gameState.wager} 
+          onExit={onExit}
+          soundEnabled={soundEnabled}
+        />
       )}
 
-      <div className="container mx-auto max-w-6xl">
-        <div className="flex justify-between items-center mb-6">
-          <Button variant="outline" onClick={onExit} className="text-gray-300">
-            <ArrowLeft className="h-4 w-4 mr-2" /> Exit Arena
+      {/* Main battle content */}
+      <div className="container mx-auto h-screen flex flex-col pt-4 pb-4 relative z-10">
+        <div className="flex justify-between items-center mb-4 px-4">
+          <Button variant="ghost" onClick={confirmExit} className="text-white bg-gray-900/60 hover:bg-gray-800/80">
+            <ArrowLeft className="h-4 w-4 mr-2" /> Exit Battle
           </Button>
-          <h1 className="text-2xl font-bold text-cyan-400">ChronoClash Arena</h1>
-          <div className="flex items-center gap-2 text-gray-300">
+          <h1 className="text-2xl font-bold text-white text-shadow-md">ChronoClash Arena</h1>
+          <div className="flex items-center gap-2 text-white bg-gray-900/60 px-3 py-1.5 rounded-md">
             <Clock className="h-4 w-4" />
-            <span>{turnTimer}s</span>
+            <span className={cn(
+              "font-mono", 
+              turnTimer < 10 ? "text-red-400" : "text-white"
+            )}>{turnTimer}s</span>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2">
-            <div className="space-y-8">
-              {/* Opponent Cards */}
-              <div className="bg-gray-800/50 p-4 rounded-lg">
-                <h2 className="text-lg font-semibold mb-4 text-gray-300">Opponent</h2>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  {opponentCards.map((card, index) => (
-                    <div key={index} ref={(el) => { opponentCardRefs.current[index] = el; }}>
-                      <EnhancedCardComponent
-                        card={card}
-                        isPlayerCard={false}
-                        isSelectable={false}
-                        isSelected={false}
-                        isTarget={isPlayerTurnNow && selectedCard !== null && !card.defeated}
-                        onAttack={() => handleAttack(index)}
-                      />
-                    </div>
-                  ))}
-                </div>
+        {/* Battle arena layout */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-grow">
+          {/* Main battle area */}
+          <div className="lg:col-span-2 flex flex-col justify-between h-full relative">
+            {/* Status hint */}
+            {hintMessage && (
+              <div className="absolute top-0 left-1/2 transform -translate-x-1/2 z-30 bg-gray-900/70 text-white px-4 py-2 rounded-md text-sm animate-fadeIn">
+                {hintMessage}
               </div>
-
-              {/* Player Cards */}
-              <div className="bg-gray-800/50 p-4 rounded-lg">
-                <h2 className="text-lg font-semibold mb-4 text-gray-300">Your Cards</h2>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  {playerCards.map((card, index) => (
-                    <div key={index} ref={(el) => { playerCardRefs.current[index] = el; }}>
-                      <EnhancedCardComponent
-                        card={card}
-                        isPlayerCard={true}
-                        isSelectable={isPlayerTurnNow && !card.defeated && card.cooldown === 0}
-                        isSelected={selectedCard === index}
-                        onSelect={() => handleCardSelect(index)}
-                      />
-                    </div>
-                  ))}
-                </div>
+            )}
+            
+            {/* Animation layer */}
+            {animation && currentAnimation && (
+              <div className="absolute inset-0 pointer-events-none z-40">
+                <BattleAttackAnimation 
+                  animation={animation}
+                  animationType={currentAnimation}
+                />
               </div>
-
-              {/* Attack Controls */}
-              {isPlayerTurnNow && selectedCard !== null && (
-                <div className="bg-gray-800 p-4 rounded-lg">
-                  <h2 className="text-lg font-semibold mb-4 text-cyan-400">Attack Controls</h2>
-                  <Tabs
-                    defaultValue={attackType}
-                    onValueChange={(value) => setAttackType(value as "normal" | "special")}
-                  >
-                    <TabsList className="w-full">
-                      <TabsTrigger value="normal" className="w-1/2">
-                        <Sword className="h-4 w-4 mr-2" /> Normal Attack
-                      </TabsTrigger>
-                      <TabsTrigger
-                        value="special"
-                        disabled={playerCards[selectedCard].usageCount < 2}
-                        className="w-1/2"
-                      >
-                        <Sword className="h-4 w-4 mr-2 text-amber-500" /> Special Attack
-                      </TabsTrigger>
-                    </TabsList>
-                    <TabsContent value="normal" className="mt-4">
-                      <p className="text-sm text-gray-300 mb-2">
-                        Select an opponent's card to attack with {playerCards[selectedCard]?.name}'s normal attack.
-                      </p>
-                      <div className="flex items-center gap-2">
-                        <Sword className="h-5 w-5" />
-                        <span>Damage: {playerCards[selectedCard]?.attackPower}</span>
-                      </div>
-                    </TabsContent>
-                    <TabsContent value="special" className="mt-4">
-                      <p className="text-sm text-gray-300 mb-2">
-                        Select an opponent's card to attack with {playerCards[selectedCard]?.name}'s special attack.
-                      </p>
-                      <div className="flex items-center gap-2">
-                        <Sword className="h-5 w-5 text-amber-500" />
-                        <span>Damage: {playerCards[selectedCard]?.specialAttackPower}</span>
-                      </div>
-                    </TabsContent>
-                  </Tabs>
+            )}
+            
+            {/* Target help popup */}
+            {showTargetHelp && (
+              <div className="absolute top-1/3 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-30 bg-gray-900/80 text-white px-4 py-3 rounded-md text-sm animate-bounce">
+                <p className="flex items-center">
+                  <span className="mr-2">↑</span>
+                  Tap an opponent's card to attack it
+                </p>
+              </div>
+            )}
+            
+            {/* Opponent cards */}
+            <div 
+              ref={opponentCardsRef}
+              className="bg-gradient-to-b from-gray-900/40 to-transparent p-4 rounded-lg"
+            >
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center">
+                  <div className="w-12 h-12 rounded-full bg-gray-700 border-2 border-amber-500 flex items-center justify-center overflow-hidden">
+                    <img src="/images/opponent-avatar.png" alt="Opponent" className="w-full h-full object-cover" />
+                  </div>
+                  <div className="ml-3">
+                    <h3 className="font-bold text-white text-lg">Opponent</h3>
+                    <div className="text-xs text-gray-300">
+                      {opponentAddress ? (
+                        <span>{opponentAddress.substring(0, 6)}...{opponentAddress.substring(opponentAddress.length - 4)}</span>
+                      ) : "Waiting..."}
+                    </div>
+                  </div>
                 </div>
-              )}
+                {!isPlayerTurnNow && (
+                  <div className="bg-red-500/70 text-white text-sm px-3 py-1 rounded-full animate-pulse">
+                    Making a move...
+                  </div>
+                )}
+              </div>
+              
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                {opponentCards.map((card, index) => (
+                  <div key={index} className="battle-card">
+                    <BattleCardDisplay
+                      card={card}
+                      position="opponent"
+                      isTargetable={isPlayerTurnNow && selectedCard !== null && !card.defeated}
+                      isSelected={false}
+                      onSelect={() => handleAttack(index)}
+                      isAnimating={currentAnimation === 'damage' && animation?.target?.cardIndex === index}
+                    />
+                  </div>
+                ))}
+              </div>
             </div>
+            
+            {/* Battle field (middle area) */}
+            <div className="flex-grow flex items-center justify-center">
+              <div className="w-24 h-24 rounded-full border-4 border-dashed border-white/30 flex items-center justify-center">
+                <div className="text-white text-4xl font-bold">VS</div>
+              </div>
+            </div>
+            
+            {/* Player cards */}
+            <div 
+              ref={playerCardsRef}
+              className="bg-gradient-to-t from-gray-900/40 to-transparent p-4 rounded-lg"
+            >
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center">
+                  <div className="w-12 h-12 rounded-full bg-gray-700 border-2 border-cyan-500 flex items-center justify-center overflow-hidden">
+                    <img src="/images/player-avatar.png" alt="You" className="w-full h-full object-cover" />
+                  </div>
+                  <div className="ml-3">
+                    <h3 className="font-bold text-white text-lg">You</h3>
+                    <div className="text-xs text-gray-300">
+                      {playerAddress.substring(0, 6)}...{playerAddress.substring(playerAddress.length - 4)}
+                    </div>
+                  </div>
+                </div>
+                {isPlayerTurnNow && (
+                  <div className="bg-cyan-500/70 text-white text-sm px-3 py-1 rounded-full animate-pulse">
+                    Your Turn
+                  </div>
+                )}
+              </div>
+              
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                {playerCards.map((card, index) => (
+                  <div key={index} className="battle-card">
+                    <BattleCardDisplay
+                      card={card}
+                      position="player"
+                      isTargetable={false}
+                      isSelected={selectedCard === index}
+                      isSelectable={isPlayerTurnNow && !card.defeated && card.cooldown === 0}
+                      onSelect={() => handleCardSelect(index)}
+                      isAnimating={currentAnimation === 'attack' && animation?.source?.cardIndex === index}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Attack controls */}
+            {isPlayerTurnNow && selectedCard !== null && (
+              <div className="absolute bottom-24 right-4 z-30">
+                <Card className="bg-gray-900/80 border-gray-700 w-64">
+                  <div className="p-3">
+                    <h3 className="text-lg font-semibold text-cyan-400 mb-2">Attack Type</h3>
+                    <Tabs
+                      defaultValue={attackType}
+                      onValueChange={handleAttackTypeChange}
+                    >
+                      <TabsList className="w-full grid grid-cols-2">
+                        <TabsTrigger value="normal" className="data-[state=active]:bg-blue-600">
+                          <Sword className="h-4 w-4 mr-2" /> Normal
+                        </TabsTrigger>
+                        <TabsTrigger 
+                          value="special" 
+                          disabled={
+                            selectedCard === null || 
+                            playerCards[selectedCard].usageCount < 2
+                          }
+                          className="data-[state=active]:bg-amber-600"
+                        >
+                          <Sword className="h-4 w-4 mr-2 text-amber-500" /> Special
+                        </TabsTrigger>
+                      </TabsList>
+                      
+                      <div className="mt-2 flex items-center justify-between text-sm px-1">
+                        <span className="text-gray-300">Damage:</span>
+                        <span className="text-white font-semibold">
+                          {selectedCard !== null && (
+                            attackType === "normal" 
+                              ? playerCards[selectedCard].attackPower 
+                              : playerCards[selectedCard].specialAttackPower
+                          )}
+                        </span>
+                      </div>
+                      
+                      <Button 
+                        size="sm" 
+                        variant="ghost" 
+                        onClick={() => setSelectedCard(null)}
+                        className="mt-2 text-xs w-full text-gray-400 hover:text-white"
+                      >
+                        <X className="h-3 w-3 mr-1" /> Cancel Selection
+                      </Button>
+                    </Tabs>
+                  </div>
+                </Card>
+              </div>
+            )}
           </div>
 
-          {/* Game HUD */}
-          <div>
-            <ArenaHUD gameState={gameState} playerAddress={playerAddress} />
+          {/* HUD and battle info */}
+          <div className="h-full">
+            <BattleArenaHUD 
+              gameState={gameState} 
+              playerAddress={playerAddress}
+              selectedCard={selectedCard !== null ? playerCards[selectedCard] : null}
+              attackType={attackType}
+            />
           </div>
         </div>
       </div>
+      
+      {/* Exit confirmation dialog */}
+      <Dialog open={showExitConfirm} onOpenChange={setShowExitConfirm}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Exit Battle?</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to exit the battle? The game will continue in the background.
+            </DialogDescription>
+          </DialogHeader>
+          
+          <div className="flex justify-end space-x-2 mt-4">
+            <Button variant="outline" onClick={() => setShowExitConfirm(false)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleExitConfirm}>
+              Exit Battle
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -674,12 +1017,6 @@ export default function GameArena({ gameState, playerAddress, onExit, onMove }: 
 
 
 
-
-
-
-
-
-
 // // "use client"
 
 // // import { useState, useEffect, useRef } from "react"
@@ -930,7 +1267,7 @@ export default function GameArena({ gameState, playerAddress, onExit, onMove }: 
 // //                 <h2 className="text-lg font-semibold mb-4 text-gray-300">Opponent</h2>
 // //                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
 // //                   {opponentCards.map((card, index) => (
-// //                     <div key={index} ref={(el) => (opponentCardRefs.current[index] = el)}>
+// //                     <div key={index} ref={(el) => { opponentCardRefs.current[index] = el; }}>
 // //                       <EnhancedCardComponent
 // //                         card={card}
 // //                         isPlayerCard={false}
@@ -949,7 +1286,7 @@ export default function GameArena({ gameState, playerAddress, onExit, onMove }: 
 // //                 <h2 className="text-lg font-semibold mb-4 text-gray-300">Your Cards</h2>
 // //                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
 // //                   {playerCards.map((card, index) => (
-// //                     <div key={index} ref={(el) => (playerCardRefs.current[index] = el)}>
+// //                     <div key={index} ref={(el) => { playerCardRefs.current[index] = el; }}>
 // //                       <EnhancedCardComponent
 // //                         card={card}
 // //                         isPlayerCard={true}
@@ -1015,3 +1352,347 @@ export default function GameArena({ gameState, playerAddress, onExit, onMove }: 
 // //     </div>
 // //   )
 // // }
+
+
+
+
+
+
+
+
+
+// // // "use client"
+
+// // // import { useState, useEffect, useRef } from "react"
+// // // import { Button } from "@/components/ui/button"
+// // // import { Card, CardContent } from "@/components/ui/card"
+// // // import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+// // // import { EnhancedCardComponent } from "@/components/game/card-component"
+// // // import { ArenaHUD } from "@/components/game/arena-hud"
+// // // import { Sword, Shield, ArrowLeft, Trophy, Clock } from "lucide-react"
+// // // import { useToast } from "@/hooks/use-toast"
+// // // import { generateCardPool, calculateDamage } from "@/lib/cards"
+// // // import { 
+// // //   applyMove, 
+// // //   createMove, 
+// // //   isPlayerTurn, 
+// // //   canSelectCard, 
+// // //   canAttackCard 
+// // // } from "@/lib/game-utils"
+// // // import type { GameState, Card as CardType, Move } from "@/lib/types"
+
+// // // interface GameArenaProps {
+// // //   gameState: GameState | null
+// // //   playerAddress: string
+// // //   onExit: () => void
+// // //   onMove: (move: Move) => Promise<boolean>
+// // // }
+
+// // // export default function GameArena({ gameState, playerAddress, onExit, onMove }: GameArenaProps) {
+// // //   const { toast } = useToast()
+// // //   const [selectedCard, setSelectedCard] = useState<number | null>(null)
+// // //   const [attackType, setAttackType] = useState<"normal" | "special">("normal")
+// // //   const [isAttacking, setIsAttacking] = useState(false)
+// // //   const [showAnimation, setShowAnimation] = useState(false)
+// // //   const [animationProps, setAnimationProps] = useState({
+// // //     type: "normal" as "normal" | "special",
+// // //     sourcePosition: { x: 0, y: 0 },
+// // //     targetPosition: { x: 0, y: 0 },
+// // //   })
+// // //   const [turnTimer, setTurnTimer] = useState(30)
+  
+// // //   const playerCardRefs = useRef<(HTMLDivElement | null)[]>([null, null, null, null])
+// // //   const opponentCardRefs = useRef<(HTMLDivElement | null)[]>([null, null, null, null])
+
+// // //   // Get player and opponent cards
+// // //   const getPlayerCards = (): CardType[] => {
+// // //     if (!gameState) return generateCardPool()
+// // //     return gameState.players[playerAddress]?.cards || generateCardPool()
+// // //   }
+
+// // //   const getOpponentCards = (): CardType[] => {
+// // //     if (!gameState) return generateCardPool()
+// // //     const opponentAddress = Object.keys(gameState.players).find(addr => addr !== playerAddress)
+// // //     if (!opponentAddress) return generateCardPool()
+// // //     return gameState.players[opponentAddress]?.cards || generateCardPool()
+// // //   }
+
+// // //   const playerCards = getPlayerCards()
+// // //   const opponentCards = getOpponentCards()
+
+// // //   // Reset timer when turn changes
+// // //   useEffect(() => {
+// // //     if (!gameState) return
+// // //     setTurnTimer(30)
+    
+// // //     const timer = setInterval(() => {
+// // //       setTurnTimer(prev => {
+// // //         if (prev <= 0) return 0
+// // //         return prev - 1
+// // //       })
+// // //     }, 1000)
+
+// // //     return () => clearInterval(timer)
+// // //   }, [gameState?.currentTurn])
+
+// // //   // Handle card selection
+// // //   const handleCardSelect = (index: number) => {
+// // //     if (!gameState) return
+// // //     if (!isPlayerTurn(gameState, playerAddress)) {
+// // //       toast({
+// // //         title: "Not your turn",
+// // //         description: "Please wait for your opponent's move",
+// // //         variant: "destructive",
+// // //       })
+// // //       return
+// // //     }
+    
+// // //     const card = playerCards[index]
+// // //     if (!canSelectCard(gameState, playerAddress, card)) {
+// // //       if (card.cooldown > 0) {
+// // //         toast({
+// // //           title: "Card on cooldown",
+// // //           description: `This card is on cooldown for ${card.cooldown} more seconds`,
+// // //           variant: "destructive",
+// // //         })
+// // //       } else if (card.defeated) {
+// // //         toast({
+// // //           title: "Card defeated",
+// // //           description: "This card has been defeated and cannot be used",
+// // //           variant: "destructive",
+// // //         })
+// // //       }
+// // //       return
+// // //     }
+
+// // //     setSelectedCard(index)
+// // //     setAttackType(card.usageCount >= 2 ? "special" : "normal")
+// // //   }
+
+// // //   // Handle attack
+// // //   const handleAttack = async (targetIndex: number) => {
+// // //     if (selectedCard === null || isAttacking || !gameState) return
+    
+// // //     const targetCard = opponentCards[targetIndex]
+// // //     if (!canAttackCard(gameState, playerAddress, targetCard)) {
+// // //       toast({
+// // //         title: "Invalid target",
+// // //         description: "This card cannot be targeted",
+// // //         variant: "destructive",
+// // //       })
+// // //       return
+// // //     }
+
+// // //     // Get positions for animation
+// // //     const sourceElement = playerCardRefs.current[selectedCard]
+// // //     const targetElement = opponentCardRefs.current[targetIndex]
+
+// // //     if (sourceElement && targetElement) {
+// // //       const sourceRect = sourceElement.getBoundingClientRect()
+// // //       const targetRect = targetElement.getBoundingClientRect()
+
+// // //       setAnimationProps({
+// // //         type: attackType,
+// // //         sourcePosition: {
+// // //           x: sourceRect.left + sourceRect.width / 2,
+// // //           y: sourceRect.top + sourceRect.height / 2,
+// // //         },
+// // //         targetPosition: {
+// // //           x: targetRect.left + targetRect.width / 2,
+// // //           y: targetRect.top + targetRect.height / 2,
+// // //         },
+// // //       })
+
+// // //       setShowAnimation(true)
+// // //     }
+
+// // //     setIsAttacking(true)
+
+// // //     try {
+// // //       // Create the move
+// // //       const move = createMove(
+// // //         playerAddress,
+// // //         selectedCard,
+// // //         targetIndex,
+// // //         attackType,
+// // //         playerCards[selectedCard],
+// // //         opponentCards[targetIndex]
+// // //       )
+
+// // //       // Send the move to the parent component
+// // //       const success = await onMove(move)
+      
+// // //       if (!success) {
+// // //         throw new Error("Failed to process move")
+// // //       }
+
+// // //       // Play sound effect
+// // //       const audio = new Audio(attackType === "normal" ? "/sounds/attack.mp3" : "/sounds/special.mp3")
+// // //       audio.volume = 0.5
+// // //       audio.play().catch(e => console.error("Failed to play sound effect:", e))
+      
+// // //     } catch (error) {
+// // //       console.error("Error processing attack:", error)
+// // //       toast({
+// // //         title: "Attack failed",
+// // //         description: "Failed to process attack. Please try again.",
+// // //         variant: "destructive",
+// // //       })
+// // //     } finally {
+// // //       setIsAttacking(false)
+// // //       setSelectedCard(null)
+// // //     }
+// // //   }
+
+// // //   // Handle animation completion
+// // //   const handleAnimationComplete = () => {
+// // //     setShowAnimation(false)
+// // //   }
+
+// // //   if (!gameState) {
+// // //     return (
+// // //       <div className="min-h-screen bg-gradient-to-b from-gray-900 to-gray-950 flex items-center justify-center">
+// // //         <div className="text-center">
+// // //           <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-cyan-500 mx-auto mb-4"></div>
+// // //           <h2 className="text-xl font-semibold text-white">Loading Arena...</h2>
+// // //           <p className="text-gray-400">Connecting to the AO process</p>
+// // //         </div>
+// // //       </div>
+// // //     )
+// // //   }
+
+// // //   const isPlayerTurnNow = isPlayerTurn(gameState, playerAddress)
+// // //   const isGameOver = gameState.status === "completed"
+// // //   const isWinner = gameState.winner === playerAddress
+
+// // //   return (
+// // //     <div className="min-h-screen bg-gradient-to-b from-gray-900 to-gray-950 p-4">
+// // //       {/* Game over modal */}
+// // //       {isGameOver && (
+// // //         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
+// // //           <Card className="w-full max-w-md bg-gray-800 border-gray-700">
+// // //             <CardContent className="p-8 text-center">
+// // //               <div className="mb-6">
+// // //                 {isWinner ? (
+// // //                   <Trophy className="h-16 w-16 text-amber-500 mx-auto" />
+// // //                 ) : (
+// // //                   <Shield className="h-16 w-16 text-red-500 mx-auto" />
+// // //                 )}
+// // //               </div>
+// // //               <h2 className="text-3xl font-bold mb-4">{isWinner ? "Victory!" : "Defeat!"}</h2>
+// // //               <p className="text-gray-300 mb-6">
+// // //                 {isWinner ? `You've won ${gameState.wager} AR tokens!` : "Better luck next time."}
+// // //               </p>
+// // //               <Button onClick={onExit} className="w-full bg-cyan-600 hover:bg-cyan-700">
+// // //                 Return to Home
+// // //               </Button>
+// // //             </CardContent>
+// // //           </Card>
+// // //         </div>
+// // //       )}
+
+// // //       <div className="container mx-auto max-w-6xl">
+// // //         <div className="flex justify-between items-center mb-6">
+// // //           <Button variant="outline" onClick={onExit} className="text-gray-300">
+// // //             <ArrowLeft className="h-4 w-4 mr-2" /> Exit Arena
+// // //           </Button>
+// // //           <h1 className="text-2xl font-bold text-cyan-400">ChronoClash Arena</h1>
+// // //           <div className="flex items-center gap-2 text-gray-300">
+// // //             <Clock className="h-4 w-4" />
+// // //             <span>{turnTimer}s</span>
+// // //           </div>
+// // //         </div>
+
+// // //         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+// // //           <div className="lg:col-span-2">
+// // //             <div className="space-y-8">
+// // //               {/* Opponent Cards */}
+// // //               <div className="bg-gray-800/50 p-4 rounded-lg">
+// // //                 <h2 className="text-lg font-semibold mb-4 text-gray-300">Opponent</h2>
+// // //                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+// // //                   {opponentCards.map((card, index) => (
+// // //                     <div key={index} ref={(el) => (opponentCardRefs.current[index] = el)}>
+// // //                       <EnhancedCardComponent
+// // //                         card={card}
+// // //                         isPlayerCard={false}
+// // //                         isSelectable={false}
+// // //                         isSelected={false}
+// // //                         isTarget={isPlayerTurnNow && selectedCard !== null && !card.defeated}
+// // //                         onAttack={() => handleAttack(index)}
+// // //                       />
+// // //                     </div>
+// // //                   ))}
+// // //                 </div>
+// // //               </div>
+
+// // //               {/* Player Cards */}
+// // //               <div className="bg-gray-800/50 p-4 rounded-lg">
+// // //                 <h2 className="text-lg font-semibold mb-4 text-gray-300">Your Cards</h2>
+// // //                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+// // //                   {playerCards.map((card, index) => (
+// // //                     <div key={index} ref={(el) => (playerCardRefs.current[index] = el)}>
+// // //                       <EnhancedCardComponent
+// // //                         card={card}
+// // //                         isPlayerCard={true}
+// // //                         isSelectable={isPlayerTurnNow && !card.defeated && card.cooldown === 0}
+// // //                         isSelected={selectedCard === index}
+// // //                         onSelect={() => handleCardSelect(index)}
+// // //                       />
+// // //                     </div>
+// // //                   ))}
+// // //                 </div>
+// // //               </div>
+
+// // //               {/* Attack Controls */}
+// // //               {isPlayerTurnNow && selectedCard !== null && (
+// // //                 <div className="bg-gray-800 p-4 rounded-lg">
+// // //                   <h2 className="text-lg font-semibold mb-4 text-cyan-400">Attack Controls</h2>
+// // //                   <Tabs
+// // //                     defaultValue={attackType}
+// // //                     onValueChange={(value) => setAttackType(value as "normal" | "special")}
+// // //                   >
+// // //                     <TabsList className="w-full">
+// // //                       <TabsTrigger value="normal" className="w-1/2">
+// // //                         <Sword className="h-4 w-4 mr-2" /> Normal Attack
+// // //                       </TabsTrigger>
+// // //                       <TabsTrigger
+// // //                         value="special"
+// // //                         disabled={playerCards[selectedCard].usageCount < 2}
+// // //                         className="w-1/2"
+// // //                       >
+// // //                         <Sword className="h-4 w-4 mr-2 text-amber-500" /> Special Attack
+// // //                       </TabsTrigger>
+// // //                     </TabsList>
+// // //                     <TabsContent value="normal" className="mt-4">
+// // //                       <p className="text-sm text-gray-300 mb-2">
+// // //                         Select an opponent's card to attack with {playerCards[selectedCard]?.name}'s normal attack.
+// // //                       </p>
+// // //                       <div className="flex items-center gap-2">
+// // //                         <Sword className="h-5 w-5" />
+// // //                         <span>Damage: {playerCards[selectedCard]?.attackPower}</span>
+// // //                       </div>
+// // //                     </TabsContent>
+// // //                     <TabsContent value="special" className="mt-4">
+// // //                       <p className="text-sm text-gray-300 mb-2">
+// // //                         Select an opponent's card to attack with {playerCards[selectedCard]?.name}'s special attack.
+// // //                       </p>
+// // //                       <div className="flex items-center gap-2">
+// // //                         <Sword className="h-5 w-5 text-amber-500" />
+// // //                         <span>Damage: {playerCards[selectedCard]?.specialAttackPower}</span>
+// // //                       </div>
+// // //                     </TabsContent>
+// // //                   </Tabs>
+// // //                 </div>
+// // //               )}
+// // //             </div>
+// // //           </div>
+
+// // //           {/* Game HUD */}
+// // //           <div>
+// // //             <ArenaHUD gameState={gameState} playerAddress={playerAddress} />
+// // //           </div>
+// // //         </div>
+// // //       </div>
+// // //     </div>
+// // //   )
+// // // }
