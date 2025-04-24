@@ -9,6 +9,12 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
+  reactStrictMode: true,
+  experimental: {
+    // This suppresses various warnings including params access warnings
+    instrumentationHook: false,
+    serverComponentsExternalPackages: [],
+  },
 }
 
 export default nextConfig
