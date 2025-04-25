@@ -1,5 +1,8 @@
-// lib/game-state-cache.ts
+// lib/game-state-cache.ts - Fixed for SSR
 import type { GameState, Move } from "./types";
+
+// Check if code is running in browser environment
+const isBrowser = typeof window !== 'undefined';
 
 /**
  * GameStateCache handles local caching of game states for offline support
@@ -13,7 +16,7 @@ export class GameStateCache {
    * Save game state to local storage
    */
   static saveGameState(matchId: string, gameState: GameState): void {
-    if (!matchId || !gameState) return;
+    if (!isBrowser || !matchId || !gameState) return;
     
     try {
       const cacheEntry = {
@@ -41,7 +44,7 @@ export class GameStateCache {
     gameState: GameState | null,
     lastSyncedMoveCount: number
   } {
-    if (!matchId) return { gameState: null, lastSyncedMoveCount: 0 };
+    if (!isBrowser || !matchId) return { gameState: null, lastSyncedMoveCount: 0 };
     
     try {
       const cacheEntry = localStorage.getItem(`${this.STORAGE_PREFIX}${matchId}`);
@@ -66,7 +69,7 @@ export class GameStateCache {
    * Clear a specific game state from local storage
    */
   static clearGameState(matchId: string): void {
-    if (!matchId) return;
+    if (!isBrowser || !matchId) return;
     
     try {
       localStorage.removeItem(`${this.STORAGE_PREFIX}${matchId}`);
@@ -80,7 +83,7 @@ export class GameStateCache {
    * Save pending moves that need to be synced when connection is restored
    */
   static savePendingMove(matchId: string, move: Move): void {
-    if (!matchId || !move) return;
+    if (!isBrowser || !matchId || !move) return;
     
     try {
       const pendingMovesKey = `${this.STORAGE_PREFIX}${matchId}_pending_moves`;
@@ -101,7 +104,7 @@ export class GameStateCache {
    * Get all pending moves for a match
    */
   static getPendingMoves(matchId: string): Move[] {
-    if (!matchId) return [];
+    if (!isBrowser || !matchId) return [];
     
     try {
       const pendingMovesKey = `${this.STORAGE_PREFIX}${matchId}_pending_moves`;
@@ -120,7 +123,7 @@ export class GameStateCache {
    * Clear pending moves after they've been synced
    */
   static clearPendingMoves(matchId: string): void {
-    if (!matchId) return;
+    if (!isBrowser || !matchId) return;
     
     try {
       const pendingMovesKey = `${this.STORAGE_PREFIX}${matchId}_pending_moves`;
@@ -134,6 +137,8 @@ export class GameStateCache {
    * Maintain a list of active games for the current user
    */
   private static updateActiveGamesList(matchId: string, gameState: GameState): void {
+    if (!isBrowser) return;
+    
     try {
       const activeGamesKey = `${this.STORAGE_PREFIX}active_games`;
       let activeGames = this.getActiveGames();
@@ -167,6 +172,8 @@ export class GameStateCache {
    * Remove a game from the active games list
    */
   private static removeFromActiveGamesList(matchId: string): void {
+    if (!isBrowser) return;
+    
     try {
       const activeGamesKey = `${this.STORAGE_PREFIX}active_games`;
       let activeGames = this.getActiveGames();
@@ -191,6 +198,8 @@ export class GameStateCache {
     creator: string;
     opponentCount: number;
   }> {
+    if (!isBrowser) return [];
+    
     try {
       const activeGamesKey = `${this.STORAGE_PREFIX}active_games`;
       const activeGamesJson = localStorage.getItem(activeGamesKey);
@@ -214,9 +223,9 @@ export class GameStateCache {
    * Cleanup expired game states
    */
   static cleanupExpiredGameStates(): void {
+    if (!isBrowser) return;
+    
     try {
-      if (typeof localStorage === 'undefined') return;
-      
       const now = Date.now();
       const prefix = this.STORAGE_PREFIX;
       
@@ -252,9 +261,10 @@ export class GameStateCache {
 }
 
 // Call cleanup on module load
-if (typeof window !== 'undefined') {
+if (isBrowser) {
   // Wait until after page load to avoid blocking rendering
   setTimeout(() => {
     GameStateCache.cleanupExpiredGameStates();
   }, 2000);
 }
+

@@ -1,10 +1,10 @@
-
 import type React from "react"
 import { Inter } from "next/font/google"
 import { ThemeProvider } from "@/components/theme-provider"
 import Script from "next/script"
 import "./globals.css"
 import { AppLoader } from "@/components/ui/app-loader"
+import { ArweaveWalletProvider } from "@/components/wallet/arweave-wallet-provider"
 
 const inter = Inter({ subsets: ["latin"] })
 
@@ -22,14 +22,20 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        <Script src="https://unpkg.com/wander-inject@latest/dist/widget-script.min.js" />
+        {/* Remove Wander script - it's now managed by Arweave Wallet Kit */}
       </head>
       <body className={inter.className}>
         <ThemeProvider attribute="class" defaultTheme="dark" enableSystem disableTransitionOnChange>
-          <AppLoader />
-          {children}
+          <ArweaveWalletProvider>
+            <AppLoader />
+            {children}
+          </ArweaveWalletProvider>
         </ThemeProvider>
       </body>
     </html>
   )
 }
+
+
+
+

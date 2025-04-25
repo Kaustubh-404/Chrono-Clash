@@ -1,8 +1,13 @@
-// lib/ao-client-enhanced.ts - Add missing isGatewayConnected method
+// lib/ao-client-enhanced.ts - Fixed for SSR
 import { aoClient } from "./ao-client"
 import { GameStateCache } from "./game-state-cache"
 import type { GameState, Move, GameStateUpdate } from "./types"
 import { applyMove } from "./game-utils"
+
+/**
+ * Check if code is running in browser environment
+ */
+const isBrowser = typeof window !== 'undefined';
 
 /**
  * Enhanced AO Client with offline support and resilient communication
@@ -16,7 +21,7 @@ export class EnhancedAoClient {
     // Monitor connection status
     aoClient.addEventListener('connection', (data) => {
       const previousOfflineMode = this.offlineMode
-      this.offlineMode = data.status === 'disconnected' || !navigator.onLine
+      this.offlineMode = data.status === 'disconnected' || (isBrowser && !navigator.onLine)
       
       // If reconnected from offline, process pending moves
       if (previousOfflineMode && !this.offlineMode) {
@@ -29,8 +34,8 @@ export class EnhancedAoClient {
       this.handleReconnect()
     })
     
-    // Initial connection check
-    this.offlineMode = !aoClient.isGatewayConnected() || !navigator.onLine
+    // Initial connection check - safely check navigator.onLine only in browser
+    this.offlineMode = !aoClient.isGatewayConnected() || (isBrowser && !navigator.onLine)
   }
   
   /**
@@ -71,6 +76,9 @@ export class EnhancedAoClient {
    * Process any pending moves that occurred while offline
    */
   private async processPendingMoves(): Promise<void> {
+    // Skip if not in browser
+    if (!isBrowser) return;
+    
     const activeGames = GameStateCache.getActiveGames()
     
     for (const game of activeGames) {
@@ -188,12 +196,16 @@ export class EnhancedAoClient {
     const updatedGameState = applyMove(gameState, move)
     
     // Save updated state to cache
-    GameStateCache.saveGameState(matchId, updatedGameState)
+    if (isBrowser) {
+      GameStateCache.saveGameState(matchId, updatedGameState)
+    }
     
     // If offline, store the move to be sent later
     if (this.offlineMode) {
       console.log("Offline mode - storing move for later sync")
-      GameStateCache.savePendingMove(matchId, move)
+      if (isBrowser) {
+        GameStateCache.savePendingMove(matchId, move)
+      }
       return { success: true, gameState: updatedGameState }
     }
     
@@ -209,7 +221,9 @@ export class EnhancedAoClient {
       if (response.status !== "success") {
         // If server rejects the move, store for retry
         console.log("Move rejected by server - storing for retry")
-        GameStateCache.savePendingMove(matchId, move)
+        if (isBrowser) {
+          GameStateCache.savePendingMove(matchId, move)
+        }
         return { success: true, gameState: updatedGameState }
       }
       
@@ -225,7 +239,9 @@ export class EnhancedAoClient {
       console.error("Error processing card play:", error)
       
       // On error, store move for later sync
-      GameStateCache.savePendingMove(matchId, move)
+      if (isBrowser) {
+        GameStateCache.savePendingMove(matchId, move)
+      }
       return { success: true, gameState: updatedGameState }
     }
   }
@@ -234,8 +250,10 @@ export class EnhancedAoClient {
    * Enhanced get game state with cache support
    */
   async getGameState(matchId: string): Promise<{ status: string, data?: GameState, error?: string }> {
-    // Try to get from cache first
-    const { gameState: cachedState } = GameStateCache.loadGameState(matchId)
+    // Try to get from cache first if in browser
+    const cachedState = isBrowser 
+      ? GameStateCache.loadGameState(matchId).gameState
+      : null;
     
     // If offline and we have cache, use it
     if (this.offlineMode && cachedState) {
@@ -248,7 +266,9 @@ export class EnhancedAoClient {
       
       if (response.status === "success" && response.data) {
         // Update cache with newest state
-        GameStateCache.saveGameState(matchId, response.data)
+        if (isBrowser) {
+          GameStateCache.saveGameState(matchId, response.data)
+        }
         return response
       } else if (cachedState) {
         // If server request fails but we have cache, use it
@@ -279,16 +299,18 @@ export class EnhancedAoClient {
     matchId: string, 
     callback: (data: GameStateUpdate) => void
   ): Promise<() => void> {
-    // Get initial state from cache
-    const { gameState: cachedState } = GameStateCache.loadGameState(matchId)
-    
-    if (cachedState) {
-      // Send cached state immediately
-      callback({
-        type: "stateUpdate",
-        matchId,
-        data: cachedState
-      })
+    // Get initial state from cache if in browser
+    if (isBrowser) {
+      const cachedState = GameStateCache.loadGameState(matchId).gameState;
+      
+      if (cachedState) {
+        // Send cached state immediately
+        callback({
+          type: "stateUpdate",
+          matchId,
+          data: cachedState
+        });
+      }
     }
     
     // Add reconnect callback
@@ -306,8 +328,8 @@ export class EnhancedAoClient {
     
     // Subscribe to real-time updates
     const removeAoSubscription = await aoClient.subscribeToGameUpdates(matchId, (update) => {
-      // Always update cache with new state
-      if (update.type === "stateUpdate" && update.data) {
+      // Always update cache with new state if in browser
+      if (isBrowser && update.type === "stateUpdate" && update.data) {
         GameStateCache.saveGameState(matchId, update.data)
       }
       
@@ -344,6 +366,9 @@ export class EnhancedAoClient {
     if (this.offlineMode) return false
     
     try {
+      // Skip in non-browser
+      if (!isBrowser) return false;
+      
       const pendingMoves = GameStateCache.getPendingMoves(matchId)
       
       // If no pending moves, just update cache
@@ -400,14 +425,16 @@ export class EnhancedAoClient {
     creator: string;
     opponentCount: number;
   }> {
-    return GameStateCache.getActiveGames()
+    return isBrowser ? GameStateCache.getActiveGames() : [];
   }
   
   /**
    * Clear game state and remove from active games
    */
   clearGameState(matchId: string): void {
-    GameStateCache.clearGameState(matchId)
+    if (isBrowser) {
+      GameStateCache.clearGameState(matchId);
+    }
   }
   
   /**
@@ -440,17 +467,5 @@ export class EnhancedAoClient {
 
 // Export singleton instance
 export const enhancedAoClient = new EnhancedAoClient()
-
-
-
-
-
-
-
-
-
-
-
-
 
 

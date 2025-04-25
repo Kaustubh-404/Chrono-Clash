@@ -1,8 +1,9 @@
-// lib/ao-client.ts
+// lib/ao-client.ts - Fixed for SSR
 import type { AoMessage, AoResponse, GameState, Move, GameStateUpdate } from "./types"
-import { isWanderAvailable } from "./wallet"
+import { walletApiStore } from "./wallet-api"
 
-
+// Check if code is running in browser environment
+const isBrowser = typeof window !== 'undefined';
 
 // Message retry configuration
 const MESSAGE_RETRY = {
@@ -36,7 +37,7 @@ export class AoClient {
     this.processId = process.env.NEXT_PUBLIC_AO_PROCESS_ID || ""
     this.scheduler = process.env.NEXT_PUBLIC_AO_SCHEDULER || "eU8XgZWrPTkYRSNV_jOw8BGO_V3bfMzQtpIpDxVlBZw"
 
-    if (typeof window !== "undefined") {
+    if (isBrowser) {
       const storedAddress = localStorage.getItem("walletAddress")
       if (storedAddress) {
         this.walletAddress = storedAddress
@@ -49,7 +50,7 @@ export class AoClient {
 
   setWalletAddress(address: string) {
     this.walletAddress = address
-    if (typeof window !== "undefined") {
+    if (isBrowser) {
       localStorage.setItem("walletAddress", address)
     }
   }
@@ -60,7 +61,7 @@ export class AoClient {
     }
     
     this.connectionCheckInterval = setInterval(async () => {
-      if (typeof window !== "undefined" && navigator.onLine) {
+      if (isBrowser && navigator.onLine) {
         try {
           // Try to ping the gateway
           const response = await fetch(`${this.gateway}/ping`, { 
@@ -93,7 +94,7 @@ export class AoClient {
             this.dispatchEvent('connection', { status: 'disconnected' })
           }
         }
-      } else if (this.isConnected) {
+      } else if (this.isConnected && isBrowser) {
         // Browser is offline
         this.isConnected = false
         this.dispatchEvent('connection', { status: 'disconnected' })
@@ -132,66 +133,108 @@ export class AoClient {
 
       console.log(`Sending ${action} message to AO process ${this.processId}:`, message)
 
-      if (isWanderAvailable()) {
+      // Get the wallet API from our global store
+      const api = walletApiStore.getApi();
+      
+      if (isBrowser && api) {
         try {
+          // Convert tags to array format for dataitem
+          const tagArray = [
+            { name: "Action", value: action },
+            { name: "Address", value: this.walletAddress },
+            { name: "RequestId", value: requestId },
+            ...Object.entries(tags).map(([name, value]) => ({ name, value }))
+          ];
+          
+          // Create dataitem for signing
           const dataItem = {
             target: this.processId,
-            tags: [
-              { name: "Action", value: action },
-              { name: "Address", value: this.walletAddress },
-              { name: "RequestId", value: requestId },
-              ...Object.entries(tags).map(([name, value]) => ({ name, value }))
-            ],
+            tags: tagArray,
             data: ""
-          }
-
-          const response = await this.sendRawMessage(dataItem)
-          console.log(`Response from AO (${action}):`, response)
+          };
           
-          // Remove from pending requests
-          delete this.pendingRequests[requestId]
-          
-          return {
-            status: "success",
-            data: response,
-            requestId
+          // Try to sign and send the message
+          try {
+            // Attempt to sign and post to gateway
+            const signedDataItem = await api.sign(dataItem);
+            
+            // Post to gateway
+            const response = await fetch(`${this.gateway}/message`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify(signedDataItem),
+            });
+            
+            if (!response.ok) {
+              const errorText = await response.text();
+              throw new Error(`Gateway error: ${response.status} ${errorText}`);
+            }
+            
+            const result = await response.json();
+            
+            // Remove from pending requests
+            delete this.pendingRequests[requestId];
+            
+            return {
+              status: "success",
+              data: result,
+              requestId
+            };
+          } catch (signError) {
+            console.error("Error signing message:", signError);
+            
+            // Retry logic with exponential backoff
+            if (retryCount < MESSAGE_RETRY.MAX_ATTEMPTS) {
+              const delay = MESSAGE_RETRY.INITIAL_DELAY * Math.pow(MESSAGE_RETRY.BACKOFF_FACTOR, retryCount);
+              console.log(`Retrying message ${action} (attempt ${retryCount + 1}) after ${delay}ms`);
+              
+              await new Promise(resolve => setTimeout(resolve, delay));
+              return this.sendMessage(action, tags, retryCount + 1);
+            }
+            
+            // If all retries failed, fallback to simulation
+            console.log("All retry attempts failed, using simulated response");
+            delete this.pendingRequests[requestId];
+            
+            return {
+              status: "success", 
+              data: this.simulateResponse(action, tags),
+              requestId,
+              simulated: true
+            };
           }
         } catch (error) {
-          console.error("Error sending message to AO:", error)
+          console.error("Error sending message to AO:", error);
           
-          // Retry logic with exponential backoff
-          if (retryCount < MESSAGE_RETRY.MAX_ATTEMPTS) {
-            const delay = MESSAGE_RETRY.INITIAL_DELAY * Math.pow(MESSAGE_RETRY.BACKOFF_FACTOR, retryCount)
-            console.log(`Retrying message ${action} (attempt ${retryCount + 1}) after ${delay}ms`)
-            
-            await new Promise(resolve => setTimeout(resolve, delay))
-            return this.sendMessage(action, tags, retryCount + 1)
-          }
-          
-          // If all retries failed, fallback to simulation
-          console.log("All retry attempts failed, using simulated response")
-          delete this.pendingRequests[requestId]
+          // Fallback to simulation
+          console.log("Error occurred, using simulated response");
+          delete this.pendingRequests[requestId];
           
           return {
             status: "success", 
             data: this.simulateResponse(action, tags),
             requestId,
             simulated: true
-          }
+          };
         }
       } else {
-        console.log("Wander wallet not available, using simulated response")
+        // Server-side or no API available - use simulation
+        console.log("Server-side rendering or no wallet API, using simulated response");
         
-        // Simulate network delay
-        await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000))
+        if (isBrowser) {
+          // Simulate network delay only in browser
+          await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
+        }
         
-        delete this.pendingRequests[requestId]
+        delete this.pendingRequests[requestId];
         return {
           status: "success", 
           data: this.simulateResponse(action, tags),
           requestId,
           simulated: true
-        }
+        };
       }
     } catch (error) {
       console.error("Error preparing message for AO:", error)
@@ -204,38 +247,7 @@ export class AoClient {
       }
     }
   }
-
-  // Helper method to send raw message using Wander
-  private async sendRawMessage(dataItem: any): Promise<any> {
-    if (!isWanderAvailable()) {
-      throw new Error("Wander wallet not available")
-    }
-
-    try {
-      // Sign the message with Wander
-      const signedDataItem = await window.wander!.sign(dataItem)
-
-      const response = await fetch(`${this.gateway}/message`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(signedDataItem),
-      })
-
-      if (!response.ok) {
-        const errorText = await response.text()
-        throw new Error(`Gateway error: ${response.status} ${errorText}`)
-      }
-
-      const result = await response.json()
-      return result
-    } catch (error) {
-      console.error("Error sending raw message:", error)
-      throw error
-    }
-  }
-
+  
   // Enhanced simulation responses with more realistic game state
   private simulateResponse(action: string, tags: Record<string, string>): any {
     switch (action) {
@@ -626,7 +638,7 @@ export class AoClient {
     }
     
     // Start polling for updates if not already polling
-    if (!this.statePollingIntervals[matchId]) {
+    if (isBrowser && !this.statePollingIntervals[matchId]) {
       this.statePollingIntervals[matchId] = setInterval(async () => {
         if (!this.isConnected) return
         
@@ -657,7 +669,7 @@ export class AoClient {
       removeListener()
       
       // Stop polling if this was the last listener
-      if (this.eventListeners[eventKey]?.length === 0 && this.statePollingIntervals[matchId]) {
+      if (isBrowser && this.eventListeners[eventKey]?.length === 0 && this.statePollingIntervals[matchId]) {
         clearInterval(this.statePollingIntervals[matchId]!)
         this.statePollingIntervals[matchId] = null
       }
@@ -681,23 +693,23 @@ export class AoClient {
     // Check for new players
     if (Object.keys(oldState.players).length !== Object.keys(newState.players).length) return true
     
-    // Deep check would need to check card states, but let's keep it simpler
-    
     return false
   }
   
   // Clean up resources
   dispose() {
     // Clear all polling intervals
-    for (const matchId in this.statePollingIntervals) {
-      if (this.statePollingIntervals[matchId]) {
-        clearInterval(this.statePollingIntervals[matchId]!)
+    if (isBrowser) {
+      for (const matchId in this.statePollingIntervals) {
+        if (this.statePollingIntervals[matchId]) {
+          clearInterval(this.statePollingIntervals[matchId]!)
+        }
       }
-    }
-    
-    // Clear connection check interval
-    if (this.connectionCheckInterval) {
-      clearInterval(this.connectionCheckInterval)
+      
+      // Clear connection check interval
+      if (this.connectionCheckInterval) {
+        clearInterval(this.connectionCheckInterval)
+      }
     }
     
     // Clear event listeners
@@ -706,25 +718,6 @@ export class AoClient {
 }
 
 export const aoClient = new AoClient()
-
-// Update types.ts for new interfaces
-// Add this to your types.ts file:
-/*
-export interface GameStateUpdate {
-  type: "stateUpdate" | "error"
-  matchId: string
-  data: GameState | null
-  error?: string
-}
-*/
-
-
-
-
-
-
-
-
 
 
 
